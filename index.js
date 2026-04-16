@@ -167,6 +167,11 @@ function buildImportFootageScript(filePath, importAsComp, targetFolder) {
   return `var importOptions=new ImportOptions(new File(${JSON.stringify(filePath)}));${importTypeCode}app.beginUndoGroup("MCP: Import Footage");var item=app.project.importFile(importOptions);${folderCode}app.endUndoGroup();return{success:true,itemName:item.name,itemIndex:item.id,type:(item instanceof CompItem)?"Comp":"Footage"};`;
 }
 
+// activate_composition
+function buildActivateCompositionScript(compName) {
+  return `var comp=null;for(var i=1;i<=app.project.numItems;i++){if(app.project.item(i) instanceof CompItem&&app.project.item(i).name===${JSON.stringify(compName)}){comp=app.project.item(i);break;}}if(!comp){return{error:"Composition not found: "+${JSON.stringify(compName)}};}comp.openInViewer();return{success:true,compName:comp.name,width:comp.width,height:comp.height,frameRate:comp.frameRate,duration:comp.duration,numLayers:comp.numLayers};`;
+}
+
 // Phase 4: effects and expressions
 function buildApplyEffectScript(layerName, effectName, properties) {
   let propCode = '';
@@ -291,6 +296,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           height: { type: 'number', description: 'New height in pixels' },
           frame_rate: { type: 'number', description: 'New frame rate' },
           duration: { type: 'number', description: 'New duration in seconds' },
+        },
+        required: ['comp_name'],
+      },
+    },
+    // --- activate composition ---
+    {
+      name: 'activate_composition',
+      description: 'Open a composition by name in the AE viewer, making it the active composition. Call this before other tools when no composition is currently active.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          comp_name: { type: 'string', description: 'Name of the composition to activate' },
         },
         required: ['comp_name'],
       },
@@ -450,6 +467,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === 'set_composition_settings') {
       const { comp_name, width, height, frame_rate, duration } = args;
       return okResult(await runExtendScript(buildSetCompositionSettingsScript(comp_name, width, height, frame_rate, duration)));
+    }
+
+    // activate composition
+    if (name === 'activate_composition') {
+      const { comp_name } = args;
+      return okResult(await runExtendScript(buildActivateCompositionScript(comp_name)));
     }
 
     // Phase 1
