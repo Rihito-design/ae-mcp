@@ -187,6 +187,16 @@ function buildSetExpressionScript(layerName, property, expression) {
   return `var comp=app.project.activeItem;if(!comp||!(comp instanceof CompItem)){return{error:"No active composition."};}var layer=null;for(var i=1;i<=comp.numLayers;i++){if(comp.layer(i).name===${JSON.stringify(layerName)}){layer=comp.layer(i);break;}}if(!layer){return{error:"Layer not found: "+${JSON.stringify(layerName)}};}var propMap={"Position":layer.transform.position,"Scale":layer.transform.scale,"Rotation":layer.transform.rotation,"Opacity":layer.transform.opacity};var prop=propMap[${JSON.stringify(property)}];if(!prop){return{error:"Unsupported property: "+${JSON.stringify(property)}};}prop.expression=${JSON.stringify(expression)};return{success:true,expression:prop.expression};`;
 }
 
+// convert_ai_to_shapes
+function buildConvertAiToShapesScript(filePath, compName, deleteOriginals) {
+  const renameCode = compName ? `comp.name=${JSON.stringify(compName)};` : '';
+  const trackCode = deleteOriginals !== false ? `originalsToDelete.push(layer);` : '';
+  const deleteCode = deleteOriginals !== false
+    ? `for(var d=originalsToDelete.length-1;d>=0;d--){try{originalsToDelete[d].remove();}catch(re){}}`
+    : '';
+  return `var f=new File(${JSON.stringify(filePath)});if(!f.exists){return{error:"File not found: "+${JSON.stringify(filePath)}};}var importOpts=new ImportOptions(f);importOpts.importAs=ImportAsType.COMP_CROPPED_LAYERS;app.beginUndoGroup("MCP: Convert AI to Shapes");var item=app.project.importFile(importOpts);var comp=null;if(item instanceof CompItem){comp=item;}else{for(var i=1;i<=app.project.numItems;i++){if(app.project.item(i) instanceof CompItem&&app.project.item(i).name===item.name){comp=app.project.item(i);break;}}}if(!comp){app.endUndoGroup();return{error:"Could not find imported composition"};}${renameCode}comp.openInViewer();var menuId=app.findMenuCommandId("Create Shapes from Vector Layer");if(!menuId||menuId===0){app.endUndoGroup();return{error:"'Create Shapes from Vector Layer' command not found. Ensure AE version supports this feature."};}var converted=[];var failed=[];var originalsToDelete=[];for(var i=comp.numLayers;i>=1;i--){var layer=comp.layer(i);if(layer instanceof AVLayer){for(var j=1;j<=comp.numLayers;j++){comp.layer(j).selected=false;}layer.selected=true;try{app.executeCommand(menuId);converted.push(layer.name);${trackCode}}catch(e){failed.push(layer.name+": "+e.toString());}}}${deleteCode}app.endUndoGroup();return{success:true,compName:comp.name,converted:converted,failed:failed,totalLayers:comp.numLayers};`;
+}
+
 // ---------------------------------------------------------------------------
 // MCP server
 // ---------------------------------------------------------------------------
@@ -396,6 +406,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['file_path'],
       },
     },
+    // --- convert AI to shapes ---
+    {
+      name: 'convert_ai_to_shapes',
+      description: 'Import an Illustrator (.ai) file and convert all its layers to After Effects shape layers. Each AI layer becomes a native ShapeLayer in a new composition.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute path to the .ai file' },
+          comp_name: { type: 'string', description: 'Name for the resulting composition (defaults to file name)' },
+          delete_originals: { type: 'boolean', description: 'Delete original vector layers after conversion (default: true)' },
+        },
+        required: ['file_path'],
+      },
+    },
     // --- Phase 4: effects ---
     {
       name: 'apply_effect',
@@ -504,6 +528,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: `File not found: ${file_path}` }], isError: true };
       }
       return okResult(await runExtendScript(buildImportFootageScript(file_path, import_as_comp, target_folder)));
+    }
+
+    // convert AI to shapes
+    if (name === 'convert_ai_to_shapes') {
+      const { file_path, comp_name, delete_originals } = args;
+      try { await fs.access(file_path); } catch {
+        return { content: [{ type: 'text', text: `File not found: ${file_path}` }], isError: true };
+      }
+      return okResult(await runExtendScript(buildConvertAiToShapesScript(file_path, comp_name, delete_originals)));
     }
 
     // Phase 4
