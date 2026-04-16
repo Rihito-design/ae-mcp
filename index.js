@@ -54,7 +54,7 @@ async function runExtendScript(script) {
 // ---------------------------------------------------------------------------
 
 // Phase 0 (existing)
-const GET_LAYERS_SCRIPT = `var comp=app.project.activeItem;if(!comp||!(comp instanceof CompItem)){return{error:"No active composition."};}var layers=[];for(var i=1;i<=comp.numLayers;i++){var layer=comp.layer(i);var type="Layer";if(layer instanceof TextLayer)type="Text";else if(layer instanceof ShapeLayer)type="Shape";else if(layer instanceof CameraLayer)type="Camera";else if(layer instanceof LightLayer)type="Light";else if(layer instanceof AVLayer)type="AV";layers.push({index:i,name:layer.name,type:type,enabled:layer.enabled,solo:layer.solo,locked:layer.locked,inPoint:layer.inPoint,outPoint:layer.outPoint});}return{compName:comp.name,frameRate:comp.frameRate,duration:comp.duration,width:comp.width,height:comp.height,layers:layers};`;
+const GET_LAYERS_SCRIPT = `var comp=app.project.activeItem;if(!comp||!(comp instanceof CompItem)){return{error:"No active composition."};}var layers=[];for(var i=1;i<=comp.numLayers;i++){var layer=comp.layer(i);var type="Layer";if(layer instanceof TextLayer)type="Text";else if(layer instanceof ShapeLayer)type="Shape";else if(layer instanceof CameraLayer)type="Camera";else if(layer instanceof LightLayer)type="Light";else if(layer instanceof AVLayer)type="AV";var tr={};try{tr.position=layer.transform.position.value;}catch(e){}try{tr.anchorPoint=layer.transform.anchorPoint.value;}catch(e){}try{tr.scale=layer.transform.scale.value;}catch(e){}try{tr.rotation=layer.transform.rotation.value;}catch(e){}try{tr.opacity=layer.transform.opacity.value;}catch(e){}var is3D=false;try{is3D=layer.threeDLayer;}catch(e){}layers.push({index:i,name:layer.name,type:type,enabled:layer.enabled,solo:layer.solo,locked:layer.locked,inPoint:layer.inPoint,outPoint:layer.outPoint,is3D:is3D,transform:tr});}return{compName:comp.name,frameRate:comp.frameRate,duration:comp.duration,width:comp.width,height:comp.height,layers:layers};`;
 
 // Phase 1: project info
 const LIST_COMPOSITIONS_SCRIPT = `var comps=[];for(var i=1;i<=app.project.numItems;i++){var item=app.project.item(i);if(item instanceof CompItem){comps.push({index:i,name:item.name,width:item.width,height:item.height,frameRate:item.frameRate,duration:item.duration,numLayers:item.numLayers});}}return{compositions:comps};`;
@@ -187,6 +187,12 @@ function buildSetExpressionScript(layerName, property, expression) {
   return `var comp=app.project.activeItem;if(!comp||!(comp instanceof CompItem)){return{error:"No active composition."};}var layer=null;for(var i=1;i<=comp.numLayers;i++){if(comp.layer(i).name===${JSON.stringify(layerName)}){layer=comp.layer(i);break;}}if(!layer){return{error:"Layer not found: "+${JSON.stringify(layerName)}};}var propMap={"Position":layer.transform.position,"Scale":layer.transform.scale,"Rotation":layer.transform.rotation,"Opacity":layer.transform.opacity};var prop=propMap[${JSON.stringify(property)}];if(!prop){return{error:"Unsupported property: "+${JSON.stringify(property)}};}prop.expression=${JSON.stringify(expression)};return{success:true,expression:prop.expression};`;
 }
 
+// convert_ai_to_shapes
+function buildConvertAiToShapesScript(filePath, compName) {
+  const renameCode = compName ? `comp.name=${JSON.stringify(compName)};` : '';
+  return `var f=new File(${JSON.stringify(filePath)});if(!f.exists){return{error:"File not found: "+${JSON.stringify(filePath)}};}var importOpts=new ImportOptions(f);importOpts.importAs=ImportAsType.COMP_CROPPED_LAYERS;app.beginUndoGroup("MCP: Convert AI to Shapes");var item=app.project.importFile(importOpts);var comp=null;if(item instanceof CompItem){comp=item;}else{for(var i=1;i<=app.project.numItems;i++){if(app.project.item(i) instanceof CompItem&&app.project.item(i).name===item.name){comp=app.project.item(i);break;}}}if(!comp){app.endUndoGroup();return{error:"Could not find imported composition"};}${renameCode}comp.openInViewer();var menuId=app.findMenuCommandId("Create Shapes from Vector Layer");if(!menuId||menuId===0){app.endUndoGroup();return{error:"'Create Shapes from Vector Layer' command not found. Ensure AE version supports this feature."};}var converted=[];var failed=[];for(var i=comp.numLayers;i>=1;i--){var layer=comp.layer(i);if(layer instanceof AVLayer){for(var j=1;j<=comp.numLayers;j++){comp.layer(j).selected=false;}layer.selected=true;try{app.executeCommand(menuId);converted.push(layer.name);}catch(e){failed.push(layer.name+": "+e.toString());}}}app.endUndoGroup();return{success:true,compName:comp.name,converted:converted,failed:failed,totalLayers:comp.numLayers};`;
+}
+
 // ---------------------------------------------------------------------------
 // MCP server
 // ---------------------------------------------------------------------------
@@ -201,7 +207,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // --- existing ---
     {
       name: 'get_layers',
-      description: 'Get all layers in the currently active After Effects composition.',
+      description: 'Get all layers in the currently active After Effects composition, including transform properties (position, anchorPoint, scale, rotation, opacity) and 3D flag for each layer.',
       inputSchema: { type: 'object', properties: {}, required: [] },
     },
     {
@@ -396,6 +402,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['file_path'],
       },
     },
+    // --- convert AI to shapes ---
+    {
+      name: 'convert_ai_to_shapes',
+      description: 'Import an Illustrator (.ai) file and convert all its layers to After Effects shape layers using "Create Shapes from Vector Layer". Each AI layer becomes a native ShapeLayer in a new composition.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute path to the .ai file' },
+          comp_name: { type: 'string', description: 'Name for the resulting composition (defaults to file name)' },
+        },
+        required: ['file_path'],
+      },
+    },
     // --- Phase 4: effects ---
     {
       name: 'apply_effect',
@@ -504,6 +523,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: `File not found: ${file_path}` }], isError: true };
       }
       return okResult(await runExtendScript(buildImportFootageScript(file_path, import_as_comp, target_folder)));
+    }
+
+    // convert AI to shapes
+    if (name === 'convert_ai_to_shapes') {
+      const { file_path, comp_name } = args;
+      try { await fs.access(file_path); } catch {
+        return { content: [{ type: 'text', text: `File not found: ${file_path}` }], isError: true };
+      }
+      return okResult(await runExtendScript(buildConvertAiToShapesScript(file_path, comp_name)));
     }
 
     // Phase 4
