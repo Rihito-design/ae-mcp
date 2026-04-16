@@ -54,7 +54,7 @@ async function runExtendScript(script) {
 // ---------------------------------------------------------------------------
 
 // Phase 0 (existing)
-const GET_LAYERS_SCRIPT = `var comp=app.project.activeItem;if(!comp||!(comp instanceof CompItem)){return{error:"No active composition."};}var layers=[];for(var i=1;i<=comp.numLayers;i++){var layer=comp.layer(i);var type="Layer";if(layer instanceof TextLayer)type="Text";else if(layer instanceof ShapeLayer)type="Shape";else if(layer instanceof CameraLayer)type="Camera";else if(layer instanceof LightLayer)type="Light";else if(layer instanceof AVLayer)type="AV";layers.push({index:i,name:layer.name,type:type,enabled:layer.enabled,solo:layer.solo,locked:layer.locked,inPoint:layer.inPoint,outPoint:layer.outPoint});}return{compName:comp.name,frameRate:comp.frameRate,duration:comp.duration,width:comp.width,height:comp.height,layers:layers};`;
+const GET_LAYERS_SCRIPT = `var comp=app.project.activeItem;if(!comp||!(comp instanceof CompItem)){return{error:"No active composition."};}var layers=[];for(var i=1;i<=comp.numLayers;i++){var layer=comp.layer(i);var type="Layer";if(layer instanceof TextLayer)type="Text";else if(layer instanceof ShapeLayer)type="Shape";else if(layer instanceof CameraLayer)type="Camera";else if(layer instanceof LightLayer)type="Light";else if(layer instanceof AVLayer)type="AV";var tr={};try{tr.position=layer.transform.position.value;}catch(e){}try{tr.anchorPoint=layer.transform.anchorPoint.value;}catch(e){}try{tr.scale=layer.transform.scale.value;}catch(e){}try{tr.rotation=layer.transform.rotation.value;}catch(e){}try{tr.opacity=layer.transform.opacity.value;}catch(e){}var is3D=false;try{is3D=layer.threeDLayer;}catch(e){}layers.push({index:i,name:layer.name,type:type,enabled:layer.enabled,solo:layer.solo,locked:layer.locked,inPoint:layer.inPoint,outPoint:layer.outPoint,is3D:is3D,transform:tr});}return{compName:comp.name,frameRate:comp.frameRate,duration:comp.duration,width:comp.width,height:comp.height,layers:layers};`;
 
 // Phase 1: project info
 const LIST_COMPOSITIONS_SCRIPT = `var comps=[];for(var i=1;i<=app.project.numItems;i++){var item=app.project.item(i);if(item instanceof CompItem){comps.push({index:i,name:item.name,width:item.width,height:item.height,frameRate:item.frameRate,duration:item.duration,numLayers:item.numLayers});}}return{compositions:comps};`;
@@ -201,7 +201,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // --- existing ---
     {
       name: 'get_layers',
-      description: 'Get all layers in the currently active After Effects composition.',
+      description: 'Get all layers in the currently active After Effects composition, including transform properties (position, anchorPoint, scale, rotation, opacity) and 3D flag for each layer.',
       inputSchema: { type: 'object', properties: {}, required: [] },
     },
     {
