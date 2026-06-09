@@ -10,6 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
+import path from 'path';
 
 const execAsync = promisify(exec);
 const AE_APP_NAME = 'Adobe After Effects (Beta)';
@@ -191,6 +192,33 @@ function buildSetExpressionScript(layerName, property, expression) {
 function buildConvertAiToShapesScript(filePath, compName) {
   const renameCode = compName ? `comp.name=${JSON.stringify(compName)};` : '';
   return `var f=new File(${JSON.stringify(filePath)});if(!f.exists){return{error:"File not found: "+${JSON.stringify(filePath)}};}var importOpts=new ImportOptions(f);importOpts.importAs=ImportAsType.COMP_CROPPED_LAYERS;app.beginUndoGroup("MCP: Convert AI to Shapes");var item=app.project.importFile(importOpts);var comp=null;if(item instanceof CompItem){comp=item;}else{for(var i=1;i<=app.project.numItems;i++){if(app.project.item(i) instanceof CompItem&&app.project.item(i).name===item.name){comp=app.project.item(i);break;}}}if(!comp){app.endUndoGroup();return{error:"Could not find imported composition"};}${renameCode}comp.openInViewer();var menuId=app.findMenuCommandId("Create Shapes from Vector Layer");if(!menuId||menuId===0){app.endUndoGroup();return{error:"'Create Shapes from Vector Layer' command not found. Ensure AE version supports this feature."};}var converted=[];var failed=[];for(var i=comp.numLayers;i>=1;i--){var layer=comp.layer(i);if(layer instanceof AVLayer){for(var j=1;j<=comp.numLayers;j++){comp.layer(j).selected=false;}layer.selected=true;try{app.executeCommand(menuId);converted.push(layer.name);}catch(e){failed.push(layer.name+": "+e.toString());}}}app.endUndoGroup();return{success:true,compName:comp.name,converted:converted,failed:failed,totalLayers:comp.numLayers};`;
+}
+
+// Phase 5: project lifecycle (new / open / from template)
+// NOTE: ExtendScript is ES3 — var only, single line, no arrow functions.
+// Shared prefix that optionally saves the current project, then closes it
+// without a "save changes?" modal so batch runs never block.
+function buildProjectSwitchPrefix(closeCurrent, saveCurrentBeforeClose) {
+  const saveCurrent = saveCurrentBeforeClose
+    ? `if(app.project&&app.project.dirty&&app.project.file){app.project.save();}`
+    : '';
+  const close = closeCurrent
+    ? `if(app.project){app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);}`
+    : '';
+  return saveCurrent + close;
+}
+
+function buildCreateProjectScript(savePath, closeCurrent, saveCurrentBeforeClose) {
+  const prefix = buildProjectSwitchPrefix(closeCurrent, saveCurrentBeforeClose);
+  const saveNew = savePath
+    ? `var sf=new File(${JSON.stringify(savePath)});if(!sf.parent.exists){return{error:"Parent folder does not exist: "+sf.parent.fsName};}app.project.save(sf);savedPath=sf.fsName;`
+    : '';
+  return `${prefix}var np=app.newProject();if(!np){return{error:"Failed to create new project (a modal dialog may have blocked it)."};}var savedPath=null;${saveNew}return{success:true,saved:(savedPath!==null),savePath:savedPath,projectName:(app.project.file?app.project.file.name:"Untitled")};`;
+}
+
+function buildOpenProjectScript(filePath, closeCurrent, saveCurrentBeforeClose) {
+  const prefix = buildProjectSwitchPrefix(closeCurrent, saveCurrentBeforeClose);
+  return `var f=new File(${JSON.stringify(filePath)});if(!f.exists){return{error:"File not found: "+${JSON.stringify(filePath)}};}${prefix}var proj=app.open(f);if(!proj){return{error:"Failed to open project: "+${JSON.stringify(filePath)}};}return{success:true,opened:true,projectPath:(app.project.file?app.project.file.fsName:null),projectName:(app.project.file?app.project.file.name:"Untitled"),numItems:app.project.numItems};`;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +470,47 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['layer_name', 'property', 'expression'],
       },
     },
+    // --- Phase 5: project lifecycle ---
+    {
+      name: 'create_project',
+      description: 'Create a brand-new empty After Effects project (app.newProject), optionally saving it as a .aep. By default closes the currently open project and DISCARDS its unsaved changes (close_current=true). Does NOT create any composition or layer — use create_composition etc. afterwards.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          save_path: { type: 'string', description: 'Absolute path to save the new project as .aep. ".aep" is appended if missing. If omitted, the project stays unsaved (Untitled).' },
+          close_current: { type: 'boolean', description: 'Close the currently open project first (default true). With unsaved changes this DISCARDS them unless save_current_before_close is true.' },
+          save_current_before_close: { type: 'boolean', description: 'Save the current project before closing it — only works if it has unsaved changes AND was already saved to a file (default false).' },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'open_project',
+      description: 'Open an existing .aep/.aepx project file (app.open). By default closes the currently open project and DISCARDS its unsaved changes (close_current=true).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute path to an existing .aep/.aepx file.' },
+          close_current: { type: 'boolean', description: 'Close the currently open project first (default true). Discards its unsaved changes unless save_current_before_close is true.' },
+          save_current_before_close: { type: 'boolean', description: 'Save the current project before closing it — only if dirty AND already saved to a file (default false).' },
+        },
+        required: ['file_path'],
+      },
+    },
+    {
+      name: 'create_project_from_template',
+      description: 'Duplicate a template .aep to a new path and open the copy, leaving the template file untouched. By default closes the currently open project and DISCARDS its unsaved changes (close_current=true).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          template_path: { type: 'string', description: 'Absolute path to an existing template .aep to duplicate. The template itself is not modified.' },
+          save_path: { type: 'string', description: 'Absolute destination path for the copy. ".aep" is appended if missing. Overwrites any existing file at this path.' },
+          close_current: { type: 'boolean', description: 'Close the currently open project first (default true). Discards unsaved changes unless save_current_before_close is true.' },
+          save_current_before_close: { type: 'boolean', description: 'Save the current project before closing it — only if dirty AND already saved to a file (default false).' },
+        },
+        required: ['template_path', 'save_path'],
+      },
+    },
   ],
 }));
 
@@ -542,6 +611,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === 'set_expression') {
       const { layer_name, property, expression } = args;
       return okResult(await runExtendScript(buildSetExpressionScript(layer_name, property, expression)));
+    }
+
+    // Phase 5: project lifecycle
+    if (name === 'create_project') {
+      let { save_path, close_current = true, save_current_before_close = false } = args;
+      if (save_path) {
+        if (!save_path.toLowerCase().endsWith('.aep')) save_path += '.aep';
+        const parentDir = path.dirname(save_path);
+        try { await fs.access(parentDir); } catch {
+          return { content: [{ type: 'text', text: `Parent folder does not exist: ${parentDir}` }], isError: true };
+        }
+      }
+      return okResult(await runExtendScript(buildCreateProjectScript(save_path, close_current, save_current_before_close)));
+    }
+    if (name === 'open_project') {
+      const { file_path, close_current = true, save_current_before_close = false } = args;
+      try { await fs.access(file_path); } catch {
+        return { content: [{ type: 'text', text: `File not found: ${file_path}` }], isError: true };
+      }
+      return okResult(await runExtendScript(buildOpenProjectScript(file_path, close_current, save_current_before_close)));
+    }
+    if (name === 'create_project_from_template') {
+      let { template_path, save_path, close_current = true, save_current_before_close = false } = args;
+      try { await fs.access(template_path); } catch {
+        return { content: [{ type: 'text', text: `Template file not found: ${template_path}` }], isError: true };
+      }
+      if (!save_path.toLowerCase().endsWith('.aep')) save_path += '.aep';
+      const parentDir = path.dirname(save_path);
+      try { await fs.access(parentDir); } catch {
+        return { content: [{ type: 'text', text: `Parent folder does not exist: ${parentDir}` }], isError: true };
+      }
+      try {
+        await fs.copyFile(template_path, save_path);
+      } catch (e) {
+        return { content: [{ type: 'text', text: `Failed to copy template: ${e.message}` }], isError: true };
+      }
+      return okResult(await runExtendScript(buildOpenProjectScript(save_path, close_current, save_current_before_close)));
     }
 
     return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };

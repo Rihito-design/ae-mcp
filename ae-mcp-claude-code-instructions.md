@@ -183,3 +183,6 @@ return { status: "render_started", outputPath: OUTPUT_FOLDER + "/" + fileName };
 - `set_keyframe_interpolation` で補間が変更できること
 - `relink_missing_footage` でリンク切れが修復されること
 - `render_composition` で `/Users/s25981/Desktop/ae_renders` にファイルが書き出されること
+- `create_project` で空の新規プロジェクトが開くこと（`save_path` 指定時に `.aep` が生成されること）
+- `open_project` で既存 `.aep` が開くこと
+- `create_project_from_template` でテンプレを複製した `.aep` が開き、テンプレ本体が変更されないこと

@@ -24,6 +24,7 @@
 - `get_layers` / `create_composition` / `set_layer_property`
 - `add_keyframe`（easing付き）/ `set_keyframe_interpolation`
 - `relink_missing_footage` / `render_composition`
+- `create_project` / `open_project` / `create_project_from_template`（プロジェクトライフサイクル系）
 
 ---
 
@@ -302,6 +303,55 @@ return { success: true, expression: prop.expression };
 ```
 
 **フェーズ4完了条件：** `apply_effect` と `set_expression` が動作すること
+
+---
+
+## プロジェクトライフサイクル系ツール
+
+「すでに開いているプロジェクト」が前提だった既存ツール群に対し、**プロジェクトそのものの新規作成・オープン・テンプレ複製**を担う。中身（コンポ・レイヤー）は作らず、既存ツールに任せる分業。
+
+3ツール共通の挙動：
+- `close_current`（bool, 既定 `true`）— 新規/オープン前に現在のプロジェクトを閉じる。`CloseOptions.DO_NOT_SAVE_CHANGES` で閉じるため**未保存変更は破棄され、保存ダイアログは出ない**（バッチを止めない）。
+- `save_current_before_close`（bool, 既定 `false`）— 現在のプロジェクトに未保存変更があり、かつ既にファイル保存済み（`app.project.file != null`）の場合のみ先に保存する。未保存（パス無し）は保存ダイアログを避けるためスキップ。
+
+### `create_project`
+
+空の新規プロジェクトを作成する（任意で `.aep` 保存）。
+
+**パラメータ：**
+- `save_path` (string, optional) — 保存先絶対パス。`.aep` が無ければ付与。省略時は未保存（Untitled）のまま。
+- `close_current` / `save_current_before_close` — 上記共通。
+
+**ExtendScriptロジック：**
+```javascript
+// (save_current_before_close / close_current の前処理後)
+var np = app.newProject();
+if (!np) return { error: "Failed to create new project ..." };
+// save_path 指定時のみ：親フォルダ存在チェック後 app.project.save(new File(save_path));
+return { success: true, saved: ..., savePath: ..., projectName: ... };
+```
+
+### `open_project`
+
+既存の `.aep`/`.aepx` を開く（`app.open`）。
+
+**パラメータ：**
+- `file_path` (string, required) — 既存プロジェクトの絶対パス。
+- `close_current` / `save_current_before_close` — 上記共通。
+
+### `create_project_from_template`
+
+テンプレ `.aep` を複製してその複製を開く。**テンプレ本体は無傷**（Node側で `fs.copyFile` してから複製を `app.open`）。
+
+**パラメータ：**
+- `template_path` (string, required) — 複製元テンプレの絶対パス。
+- `save_path` (string, required) — 複製先絶対パス。`.aep` 付与。既存ファイルは上書き。
+- `close_current` / `save_current_before_close` — 上記共通。
+
+**エッジケース（3ツール共通）：**
+- `save_path` の親ディレクトリが無い → Node側 `fs.access` で明確なエラーを返す（JSX側でも `File.parent.exists` で二重ガード）。
+- `file_path` / `template_path` が存在しない → Node側 `fs.access` でエラー。
+- AE未起動／ブリッジ未接続時は既存ツールと同じく `runExtendScript` がタイムアウト／結果未書き出しで失敗する。
 
 ---
 
